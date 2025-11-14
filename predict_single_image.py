@@ -79,6 +79,12 @@ def parse_args() -> argparse.Namespace:
         help="Font thickness for label text.",
     )
     parser.add_argument(
+        "--line-merge-pixels",
+        type=float,
+        default=25.0,
+        help="Vertical tolerance (in pixels) when grouping letters into lines.",
+    )
+    parser.add_argument(
         "--show",
         action="store_true",
         help="Display the annotated image in a window.",
@@ -153,6 +159,59 @@ def draw_detections(
     return annotated
 
 
+def extract_letter_detections(
+    boxes: NDArray[np.float32],
+    class_ids: Sequence[int],
+    class_names: Sequence[str],
+) -> list[tuple[str, float, float]]:
+    """Return (char, x_center, y_center) for detected letter classes."""
+    letters: list[tuple[str, float, float]] = []
+    for (x1, y1, x2, y2), cls in zip(boxes, class_ids):
+        if cls < 0 or cls >= len(class_names):
+            continue
+        name = class_names[cls]
+        if not name.startswith("letter_") or len(name) <= len("letter_"):
+            continue
+        char = name.split("_", 1)[1]
+        x_center = float((x1 + x2) / 2.0)
+        y_center = float((y1 + y2) / 2.0)
+        letters.append((char, x_center, y_center))
+    return letters
+
+
+def group_letters_into_lines(
+    letters: Sequence[tuple[str, float, float]],
+    vertical_tolerance: float,
+) -> list[str]:
+    """Group letters into lines by vertical proximity, then sort left-to-right."""
+    if not letters:
+        return []
+
+    sorted_letters = sorted(letters, key=lambda item: item[2])
+    line_entries: list[list[tuple[str, float, float]]] = []
+    line_means: list[float] = []
+
+    for char, x_center, y_center in sorted_letters:
+        assigned = False
+        for idx, mean_y in enumerate(line_means):
+            if abs(y_center - mean_y) <= vertical_tolerance:
+                entries = line_entries[idx]
+                entries.append((char, x_center, y_center))
+                line_means[idx] = ((mean_y * (len(entries) - 1)) + y_center) / len(entries)
+                assigned = True
+                break
+        if not assigned:
+            line_entries.append([(char, x_center, y_center)])
+            line_means.append(y_center)
+
+    output_lines: list[str] = []
+    for idx in sorted(range(len(line_entries)), key=lambda i: line_means[i]):
+        ordered = sorted(line_entries[idx], key=lambda entry: entry[1])
+        output_lines.append("".join(char for char, _, _ in ordered))
+
+    return output_lines
+
+
 def predict_single_image(args: argparse.Namespace) -> Path:
     if not args.weights.exists():
         raise FileNotFoundError(f"Weights file not found: {args.weights}")
@@ -186,6 +245,15 @@ def predict_single_image(args: argparse.Namespace) -> Path:
 
     image = load_image(args.image)
     class_names = tuple(result.names.values()) if result.names else tuple()
+
+    letter_detections = extract_letter_detections(boxes_np, class_ids_np, class_names)
+    letter_lines = group_letters_into_lines(letter_detections, args.line_merge_pixels)
+    if letter_lines:
+        LOGGER.info("Detected letters (top to bottom):")
+        for line in letter_lines:
+            LOGGER.info("  %s", line)
+    else:
+        LOGGER.info("No letter detections found.")
 
     annotated = draw_detections(
         image=image,

@@ -10,7 +10,7 @@ def main():
                                 "fizz_yolo_dataset",
                                 "fizz_dataset.yaml")
 
-    model = YOLO("yolo12s.pt")
+    model = YOLO("yolo12m.pt")
     
     results = model.train(
         data=dataset_yaml,
@@ -24,7 +24,7 @@ def main():
         lr0=1e-3,
         patience=20,
         verbose=True,
-        device=0,
+        device=[0,1,2,3],
         exist_ok=True,
         # W&B integration
         val=True
