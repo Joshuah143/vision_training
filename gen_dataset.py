@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
@@ -298,6 +300,93 @@ def write_dataset_yaml(config: DatasetConfig) -> None:
     config.yaml_path.write_text(yaml_content, encoding="utf-8")
 
 
+def _process_plate(
+    plate_index: int,
+    plate_path: Path,
+    config: DatasetConfig,
+    backgrounds: list[NDArrayUInt8],
+    seed: int | None,
+    progress: tqdm,
+) -> list[Path]:
+    """Worker function to generate augmentations for a single plate image."""
+    plate_img = cv2.imread(str(plate_path), cv2.IMREAD_COLOR)
+    if plate_img is None:
+        LOGGER.warning("Skipping unreadable plate image: %s", plate_path)
+        progress.update(config.augmentations_per_plate)
+        return []
+
+    rng_seed = seed + plate_index if seed is not None else None
+    rng = random.Random(rng_seed)
+    np_rng = np.random.default_rng(rng_seed)
+
+    generated: list[Path] = []
+    for idx in range(config.augmentations_per_plate):
+        progress.update()
+
+        background = random_background(backgrounds, config, np_rng)
+        transformed_sign, transformed_mask = random_affine_on_sign(plate_img, rng)
+        if transformed_mask.max() == 0:
+            LOGGER.debug(
+                "Skipping sample with empty mask (%s idx=%d)",
+                plate_path.name,
+                idx,
+            )
+            continue
+
+        augmented_sign = add_noise_blur(transformed_sign, rng, np_rng)
+        sign_height, sign_width = augmented_sign.shape[:2]
+
+        if sign_width > config.image_width or sign_height > config.image_height:
+            LOGGER.debug(
+                "Skipping sample with oversized sign (%s idx=%d)",
+                plate_path.name,
+                idx,
+            )
+            continue
+
+        max_x = config.image_width - sign_width
+        max_y = config.image_height - sign_height
+        x = rng.randint(0, max_x) if max_x > 0 else 0
+        y = rng.randint(0, max_y) if max_y > 0 else 0
+
+        composite = background.copy()
+        roi = composite[y : y + sign_height, x : x + sign_width]
+        cv2.copyTo(augmented_sign, transformed_mask, roi)
+
+        bbox = compute_yolo_bbox(
+            x,
+            y,
+            sign_width,
+            sign_height,
+            config.image_width,
+            config.image_height,
+        )
+
+        if rng.random() < config.train_ratio:
+            img_dir = config.images_train_dir
+            lbl_dir = config.labels_train_dir
+        else:
+            img_dir = config.images_val_dir
+            lbl_dir = config.labels_val_dir
+
+        suffix = f"{plate_path.stem}_{idx}"
+        img_path = img_dir / f"{suffix}.jpg"
+        lbl_path = lbl_dir / f"{suffix}.txt"
+
+        if not cv2.imwrite(str(img_path), composite):
+            LOGGER.error("Failed to write image %s", img_path)
+            continue
+
+        label_content = (
+            f"{config.fizz_sign_class_index} "
+            f"{bbox[0]:.6f} {bbox[1]:.6f} {bbox[2]:.6f} {bbox[3]:.6f}\n"
+        )
+        lbl_path.write_text(label_content, encoding="utf-8")
+        generated.append(img_path)
+
+    return generated
+
+
 def generate_dataset(
     config: DatasetConfig | None = None, seed: int | None = None
 ) -> list[Path]:
@@ -306,8 +395,6 @@ def generate_dataset(
         config = DatasetConfig()
 
     ensure_directories(config)
-    rng = random.Random(seed)
-    np_rng = np.random.default_rng(seed)
 
     backgrounds = load_backgrounds(config)
     plate_paths = collect_plate_paths(config.plates_dir)
@@ -317,74 +404,28 @@ def generate_dataset(
 
     generated_images: list[Path] = []
 
-    for plate_path in tqdm(plate_paths, desc="Generating synthetic images"):
-        plate_img = cv2.imread(str(plate_path), cv2.IMREAD_COLOR)
-        if plate_img is None:
-            LOGGER.warning("Skipping unreadable plate image: %s", plate_path)
-            continue
-
-        base_name = plate_path.stem
-        for idx in range(config.augmentations_per_plate):
-            background = random_background(backgrounds, config, np_rng)
-            transformed_sign, transformed_mask = random_affine_on_sign(plate_img, rng)
-            if transformed_mask.max() == 0:
-                LOGGER.debug(
-                    "Skipping sample with empty mask (%s idx=%d)",
-                    plate_path.name,
-                    idx,
+    total_attempts = len(plate_paths) * config.augmentations_per_plate
+    max_workers = os.cpu_count() or 1
+    with tqdm(
+        total=total_attempts,
+        desc="Generating synthetic images",
+        unit="img",
+    ) as progress:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(
+                    _process_plate,
+                    index,
+                    plate_path,
+                    config,
+                    backgrounds,
+                    seed,
+                    progress,
                 )
-                continue
-
-            augmented_sign = add_noise_blur(transformed_sign, rng, np_rng)
-            sign_height, sign_width = augmented_sign.shape[:2]
-
-            if sign_width > config.image_width or sign_height > config.image_height:
-                LOGGER.debug(
-                    "Skipping sample with oversized sign (%s idx=%d)",
-                    plate_path.name,
-                    idx,
-                )
-                continue
-
-            max_x = config.image_width - sign_width
-            max_y = config.image_height - sign_height
-            x = rng.randint(0, max_x) if max_x > 0 else 0
-            y = rng.randint(0, max_y) if max_y > 0 else 0
-
-            composite = background.copy()
-            roi = composite[y : y + sign_height, x : x + sign_width]
-            cv2.copyTo(augmented_sign, transformed_mask, roi)
-
-            bbox = compute_yolo_bbox(
-                x,
-                y,
-                sign_width,
-                sign_height,
-                config.image_width,
-                config.image_height,
-            )
-
-            if rng.random() < config.train_ratio:
-                img_dir = config.images_train_dir
-                lbl_dir = config.labels_train_dir
-            else:
-                img_dir = config.images_val_dir
-                lbl_dir = config.labels_val_dir
-
-            img_name = f"{base_name}_{idx}.jpg"
-            img_path = img_dir / img_name
-            lbl_path = lbl_dir / f"{base_name}_{idx}.txt"
-
-            if not cv2.imwrite(str(img_path), composite):
-                LOGGER.error("Failed to write image %s", img_path)
-                continue
-
-            label_content = (
-                f"{config.fizz_sign_class_index} "
-                f"{bbox[0]:.6f} {bbox[1]:.6f} {bbox[2]:.6f} {bbox[3]:.6f}\n"
-            )
-            lbl_path.write_text(label_content, encoding="utf-8")
-            generated_images.append(img_path)
+                for index, plate_path in enumerate(plate_paths)
+            ]
+            for future in as_completed(futures):
+                generated_images.extend(future.result())
 
     write_dataset_yaml(config)
     LOGGER.info("Dataset created at %s", config.dataset_root)

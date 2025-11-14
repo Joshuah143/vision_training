@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-import string
-
-import cv2
-import csv
-import numpy as np
 import os
-import random
-import requests
-from PIL import Image, ImageFont, ImageDraw
+import string
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Literal, get_args
+
+import cv2
+import numpy as np
+import random
+from PIL import Image, ImageDraw, ImageFont
+from tqdm import tqdm
 
 ClueType = Literal["SIZE", "VICTIM", "CRIME", "TIME", "PLACE", "MOTIVE", "WEAPON", "BANDIT"]
 TYPES = list(get_args(ClueType))
@@ -26,7 +26,6 @@ PLATE_WIDTH = 400
 def save_banner(clue_type: ClueType, clue_text: str, save_path: Path):
     font_size = 90
     font_path = Path("gen_tools/UbuntuMono-Regular.ttf")
-    print(f"Gen: {clue_type},{clue_text}")
     blank_plate_pil = Image.fromarray(banner_canvas)
     draw = ImageDraw.Draw(blank_plate_pil)
     monospace = ImageFont.truetype(font_path, font_size)
@@ -56,12 +55,26 @@ def random_clue_text():
         w2 = "".join(random.choice(string.ascii_uppercase) for _ in range(length2))
         return f"{w1} {w2}"
 
+
+def _generate_plate(task: tuple[int, str, str]):
+    index, key, value = task
+    save_banner(key, value, output_path / f"{index}_{key}_{value}.png")
+
+
 def main():
     NUM_PLATES = 10000  # or more
-    for i in range(NUM_PLATES):
-        key = random.choice(TYPES)
-        value = random_clue_text()
-        save_banner(key, value, output_path / f"{i}_{key}_{value}.png")
+    print(f"Generating {NUM_PLATES} plates")
+    tasks = [(i, random.choice(TYPES), random_clue_text()) for i in range(NUM_PLATES)]
+    max_workers = os.cpu_count() or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_generate_plate, task) for task in tasks]
+        for future in tqdm(
+            as_completed(futures),
+            total=len(futures),
+            desc="Generating plates",
+            unit="plate",
+        ):
+            future.result()
 
 if __name__ == "__main__":
     main()
