@@ -2,8 +2,6 @@ import os
 import wandb
 from ultralytics import YOLO
 
-# Make sure you've done: export WANDB_API_KEY=... before running
-
 def main():
     
     wandb.init(project="enph353-fizz-yolo", name="yolo_fizz_obstacles_v1")
@@ -18,15 +16,15 @@ def main():
         data=dataset_yaml,
         epochs=50,              # adjust as needed
         imgsz=640,
-        batch=16,
+        batch=-1,
         project="enph353-fizz-yolo",
         name="yolo_fizz_obstacles_v1",
         pretrained=True,
         optimizer="AdamW",
         lr0=1e-3,
-        patience=20,            # early stopping if val plateaus
+        patience=20,
         verbose=True,
-        device='mps',               # GPU index
+        device=0,
         exist_ok=True,
         # W&B integration
         val=True
