@@ -1,0 +1,5 @@
+rsync -avz \
+  -e "ssh -i ~/.ssh/id_ed25519 -p 40087" \
+  root@213.192.2.66:/workspace/vision_training/enph353-fizz-yolo/yolo_fizz_obstacles_v1/weights/best.pt \
+  /Users/joshuahimmens/code/enph353_training/
+

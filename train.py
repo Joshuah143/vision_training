@@ -10,13 +10,13 @@ def main():
                                 "fizz_yolo_dataset",
                                 "fizz_dataset.yaml")
 
-    model = YOLO("yolo12m.pt")
+    model = YOLO("yolo12l.pt")
     
     results = model.train(
         data=dataset_yaml,
         epochs=50,              # adjust as needed
         imgsz=640,
-        batch=-1,
+        batch=128,
         project="enph353-fizz-yolo",
         name="yolo_fizz_obstacles_v1",
         pretrained=True,
